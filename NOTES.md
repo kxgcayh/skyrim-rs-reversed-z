@@ -1,6 +1,6 @@
 # skyrim-rs-reversed-z (local fork work)
 
-- Upstream: https://github.com/TwistedModding/skyrim-rs-reversed-z (MPL-2.0). Local branch `crossover-d3d11`; `origin` not set yet (fork denied by the classifier 2026-11-13; user runs `gh repo fork`). `extern/skyrim-rs` is a linked worktree of `tools/skyrim-rs` at v1.0.23.
+- Upstream: https://github.com/TwistedModding/skyrim-rs-reversed-z (MPL-2.0). Local branch `crossover-d3d11`; `origin` = kxgcayh/skyrim-rs-reversed-z (forked and pushed 2026-11-13). `extern/skyrim-rs` is a linked worktree of `tools/skyrim-rs` at v1.0.23.
 - Problem on CrossOver (D3DMetal): the plugin turned the depth buffer to reversed Z but rewrote no shaders, so the world broke.
   1. `D3D11CreateDevice(WARP)` on the system `d3d11.dll` fails (0x80070057), so the early shader-creation hook never installed and capture ran after the game had built its shaders (420,682 bytecode misses).
   2. After 1 was fixed, `GetPrivateData` on D3DMetal shader objects fails even right after a successful `SetPrivateData` (0x80070057), so stored bytecode never came back (563,410 misses, 0 twins).
