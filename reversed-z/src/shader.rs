@@ -86,6 +86,12 @@ struct Resolved {
 }
 
 static RESOLVED: Mutex<Option<PointerMap<Resolved>>> = Mutex::new(None);
+
+/// Bytecode by shader pointer, for a D3D11 whose shader objects do not give back their private
+/// data (a translation layer). Each entry holds a reference, so the pointer cannot be reused.
+static STORE: Mutex<Option<std::collections::HashMap<usize, (ID3D11DeviceChild, Vec<u8>)>>> =
+    Mutex::new(None);
+static READBACK_LOGGED: AtomicU64 = AtomicU64::new(0);
 /// Cached shaders past this many are released and looked up again.
 const RESOLVED_LIMIT: usize = 1 << 14;
 
@@ -325,6 +331,20 @@ macro_rules! creation_hook {
                     }
                     Err(e) => crate::log(&format!("shader bytecode capture failed: {e}")),
                 }
+                let bytes = unsafe { core::slice::from_raw_parts(code.cast::<u8>(), size as usize) };
+                STORE
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(Default::default)
+                    .insert(shader.as_raw() as usize, (shader.clone(), bytes.to_vec()));
+                if READBACK_LOGGED.fetch_add(1, Ordering::Relaxed) < 3 {
+                    let mut got = 0;
+                    let read = unsafe { shader.GetPrivateData(&BYTECODE, &raw mut got, None) };
+                    crate::log(&format!(
+                        "capture check: wrote {size} bytes, GetPrivateData size query {:?} (size {got})",
+                        read.as_ref().map(|_| ()).map_err(|e| e.code())
+                    ));
+                }
             }
             result
         }
@@ -344,11 +364,20 @@ pub(crate) fn settled(shader: *mut c_void) -> Option<(*mut c_void, Option<u32>)>
 
 fn bytecode(shader: &ID3D11DeviceChild) -> Option<Vec<u8>> {
     let mut size = 0;
-    unsafe { shader.GetPrivateData(&BYTECODE, &raw mut size, None) }.ok()?;
-    let mut code = vec![0; size as usize];
-    unsafe { shader.GetPrivateData(&BYTECODE, &raw mut size, Some(code.as_mut_ptr().cast())) }
-        .ok()?;
-    Some(code)
+    if unsafe { shader.GetPrivateData(&BYTECODE, &raw mut size, None) }.is_ok() {
+        let mut code = vec![0; size as usize];
+        if unsafe { shader.GetPrivateData(&BYTECODE, &raw mut size, Some(code.as_mut_ptr().cast())) }
+            .is_ok()
+        {
+            return Some(code);
+        }
+    }
+    STORE
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .get(&(shader.as_raw() as usize))
+        .map(|(_, code)| code.clone())
 }
 
 pub(crate) fn mirrored(
