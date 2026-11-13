@@ -132,8 +132,21 @@ pub(crate) fn system_d3d11() -> Option<HMODULE> {
 /// A WARP device of the system's D3D11 and its immediate context. Every device of that D3D11,
 /// hardware or not, shares their tables, so hooks taken from them sit below any wrapper's.
 pub(crate) fn system_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
+    match system_device_checked() {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            crate::log(&format!("system D3D11 device: {e}"));
+            None
+        }
+    }
+}
+
+fn system_device_checked() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+    let module = system_d3d11().ok_or("the system's d3d11.dll did not load")?;
     let create: CreateDeviceFn = unsafe {
-        core::mem::transmute(GetProcAddress(system_d3d11()?, s!("D3D11CreateDevice"))?)
+        core::mem::transmute(
+            GetProcAddress(module, s!("D3D11CreateDevice")).ok_or("no D3D11CreateDevice export")?,
+        )
     };
     let (mut device, mut context) = (core::ptr::null_mut(), core::ptr::null_mut());
     unsafe {
@@ -151,19 +164,33 @@ pub(crate) fn system_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
         )
     }
     .ok()
-    .ok()?;
+    .map_err(|e| format!("D3D11CreateDevice(WARP) failed: {e}"))?;
     let device = (!device.is_null()).then(|| unsafe { ID3D11Device::from_raw(device) });
     let context = (!context.is_null()).then(|| unsafe { ID3D11DeviceContext::from_raw(context) });
-    Some((device?, context?))
+    Ok((device.ok_or("no device returned")?, context.ok_or("no context returned")?))
+}
+
+/// The d3d11.dll the game itself imported, when the system's cannot make a device here (a
+/// translation layer such as CrossOver's, which has no WARP): its creation functions are hooked
+/// the way DXVK's are, before the game makes its device.
+fn loaded_d3d11() -> Option<HMODULE> {
+    unsafe { GetModuleHandleW(w!("d3d11.dll")) }.ok()
 }
 
 /// Hooks shader creation where every draw finally lands: on the system's D3D11 below any wrapper
 /// (ENB, a proxy), whose device makes the shaders the context later binds, or at device
 /// creation on DXVK's D3D11 when Community Shaders loaded it.
 pub(crate) fn install() -> Result<(), String> {
-    let Some(module) = dxvk() else {
-        let (device, _) = system_device().ok_or("no system D3D11 device")?;
-        return install_device(&device);
+    let module = match dxvk() {
+        Some(module) => module,
+        None => match system_device() {
+            Some((device, _)) => return install_device(&device),
+            None => {
+                let module = loaded_d3d11().ok_or("no system D3D11 device and no d3d11.dll loaded")?;
+                crate::log("shader capture: hooking the loaded d3d11.dll's device creation instead");
+                module
+            }
+        },
     };
     let device =
         unsafe { GetProcAddress(module, s!("D3D11CreateDevice")) }.ok_or("no D3D11CreateDevice")?;
