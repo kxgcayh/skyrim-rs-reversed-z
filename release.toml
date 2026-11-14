@@ -1,0 +1,18 @@
+name = "reversed-z-crossover"
+display_name = "Skyrim Reversed-Z CrossOver"
+version = "1.0.23-fork.1"
+description = "Skyrim Reversed-Z 1.0.23 (TwistedModding, Nexus 197770) with the CrossOver / D3DMetal fix: shader private data is always read into a buffer, and device creation is hooked on the system d3d11.dll when it makes no WARP device. Replaces Skyrim Reversed-Z; keep only one enabled."
+
+[files]
+"SKSE/Plugins/skyrim-runtime-extender/reversed_z.dll" = "target/x86_64-pc-windows-msvc/release/reversed_z.dll"
+"README.md" = "README.md"
+"LICENSE.txt" = "LICENSE"
+
+[nexus]
+mod_id = 0
+file_id = 0
+category = "main"
+mod_category = 62                 # same as the original's download .meta (Reversed Z 197770 1.0.23)
+
+[github]
+repo = "kxgcayh/skyrim-rs-reversed-z"
