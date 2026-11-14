@@ -57,6 +57,9 @@ type CreateVertexFn = unsafe extern "system" fn(
 ) -> HRESULT;
 
 const BYTECODE: GUID = GUID::from_u128(0xd477a0ab_d726_49e6_950b_e489c39b014a);
+/// The length of `BYTECODE`, so every read passes a buffer: `D3DMetal` (`CrossOver`) fails a size
+/// query without one.
+const BYTECODE_SIZE: GUID = GUID::from_u128(0x3c1f0e52_8a47_4d6b_9e0b_5f2a7d41c3e8);
 const TWIN: GUID = GUID::from_u128(0x68471e87_b4a1_43de_842f_6907faeae34e);
 const CONSTANTS: GUID = GUID::from_u128(0x66b348c6_c52c_47dc_81c5_650970d4c881);
 const NO_CONSTANTS: u32 = u32::MAX;
@@ -159,11 +162,16 @@ pub(crate) fn system_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
 
 /// Hooks shader creation where every draw finally lands: on the system's D3D11 below any wrapper
 /// (ENB, a proxy), whose device makes the shaders the context later binds, or at device
-/// creation on DXVK's D3D11 when Community Shaders loaded it.
+/// creation on DXVK's D3D11 when Community Shaders loaded it. Where the system's D3D11 makes no
+/// WARP device (`D3DMetal` under `CrossOver`), its device creation is hooked as DXVK's is.
 pub(crate) fn install() -> Result<(), String> {
-    let Some(module) = dxvk() else {
-        let (device, _) = system_device().ok_or("no system D3D11 device")?;
+    let module = if let Some(module) = dxvk() {
+        module
+    } else if let Some((device, _)) = system_device() {
         return install_device(&device);
+    } else {
+        crate::log("no WARP device from the system's D3D11; hooking its device creation instead");
+        system_d3d11().ok_or("the system's d3d11.dll did not load")?
     };
     let device =
         unsafe { GetProcAddress(module, s!("D3D11CreateDevice")) }.ok_or("no D3D11CreateDevice")?;
@@ -292,7 +300,11 @@ macro_rules! creation_hook {
                 && let Some(shader) = unsafe { ID3D11DeviceChild::from_raw_borrowed(&*shader) }
                 && let Ok(size) = u32::try_from(size)
             {
-                match unsafe { shader.SetPrivateData(&BYTECODE, size, Some(code)) } {
+                let stored = unsafe { shader.SetPrivateData(&BYTECODE, size, Some(code)) }
+                    .and_then(|()| unsafe {
+                        shader.SetPrivateData(&BYTECODE_SIZE, 4, Some((&raw const size).cast()))
+                    });
+                match stored {
                     Ok(()) => {
                         CAPTURED.fetch_add(1, Ordering::Relaxed);
                     }
@@ -315,9 +327,15 @@ pub(crate) fn settled(shader: *mut c_void) -> Option<(*mut c_void, Option<u32>)>
     Some((found.twin.map_or(shader, |twin| twin as *mut c_void), found.slot))
 }
 
+/// A 4-byte value stored on `child` under `key`, read into a buffer.
+fn private_u32(child: &ID3D11DeviceChild, key: &GUID) -> Option<u32> {
+    let (mut size, mut value) = (4, 0u32);
+    unsafe { child.GetPrivateData(key, &raw mut size, Some((&raw mut value).cast())) }.ok()?;
+    (size == 4).then_some(value)
+}
+
 fn bytecode(shader: &ID3D11DeviceChild) -> Option<Vec<u8>> {
-    let mut size = 0;
-    unsafe { shader.GetPrivateData(&BYTECODE, &raw mut size, None) }.ok()?;
+    let mut size = private_u32(shader, &BYTECODE_SIZE)?;
     let mut code = vec![0; size as usize];
     unsafe { shader.GetPrivateData(&BYTECODE, &raw mut size, Some(code.as_mut_ptr().cast())) }
         .ok()?;
@@ -376,9 +394,8 @@ fn mirror<S: Interface + core::ops::Deref<Target = ID3D11DeviceChild>>(
         ));
     }
     let result = resolve(shader, fallback, rewrite, create, vertex);
-    let mut size = 0;
     // a shader without its bytecode yet is looked up again, so its engine record can supply it
-    if unsafe { shader.GetPrivateData(&CONSTANTS, &raw mut size, None) }.is_ok() {
+    if private_u32(shader, &CONSTANTS).is_some() {
         let mut resolved = RESOLVED.lock().unwrap();
         let map = resolved.get_or_insert_with(PointerMap::default);
         if map.len() >= RESOLVED_LIMIT {
